@@ -1,0 +1,24 @@
+{
+  "pluginAlias": "AirTouchAdvanced",
+  "pluginType": "platform",
+  "singular": true,
+  "strictValidation": false,
+  "schema": {
+    "type": "object",
+    "required": ["name"],
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "default": "AirTouch Advanced"
+      },
+      "host": {
+        "title": "AirTouch Controller IP",
+        "type": "string",
+        "placeholder": "192.168.1.100",
+        "description": "Local IP address of your AirTouch controller. Leave blank until you know the address."
+      }
+    }
+  }
+}
