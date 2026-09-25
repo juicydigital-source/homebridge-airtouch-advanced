@@ -308,47 +308,94 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
       { kind: 'zone', zoneNumber },
     );
 
-    // Keep the current room temperature visible on the main room card.
-    // Air Vent and On / Off remain linked controls for automations.
+    // Force a native climate-style room card so Apple Home prominently shows
+    // the current room temperature. Room-level mode is intentionally limited
+    // to Off / Auto: it only controls whether the AirTouch zone is enabled.
     for (const service of [...accessory.services]) {
       if (
         service.UUID === this.Service.HeaterCooler.UUID
-        || service.UUID === this.Service.Thermostat.UUID
+        || service.UUID === this.Service.TemperatureSensor.UUID
         || service.UUID === this.Service.WindowCovering.UUID
+        || service.UUID === this.Service.Switch.UUID
       ) {
         accessory.removeService(service);
       }
     }
 
-    let temperature = accessory.getServiceById(this.Service.TemperatureSensor, 'room-temperature');
-    if (!temperature) {
-      temperature = accessory.addService(
-        this.Service.TemperatureSensor,
-        name,
-        'room-temperature',
-      );
+    let climate = accessory.getServiceById(this.Service.Thermostat, 'room-climate');
+    if (!climate) {
+      climate = accessory.addService(this.Service.Thermostat, name, 'room-climate');
     }
-    this.setServiceName(temperature, name);
-    temperature.setPrimaryService();
+    this.setServiceName(climate, name);
+    climate.setPrimaryService();
+    climate.setCharacteristic(
+      this.Characteristic.TemperatureDisplayUnits,
+      this.Characteristic.TemperatureDisplayUnits.CELSIUS,
+    );
 
-    const currentTemperature = temperature.getCharacteristic(this.Characteristic.CurrentTemperature);
+    const currentTemperature = climate.getCharacteristic(this.Characteristic.CurrentTemperature);
     if (!currentTemperature.listenerCount('get')) {
       currentTemperature.onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_temp ?? 20);
     }
 
-    let airVent = accessory.getServiceById(this.Service.Fanv2, 'damper');
+    const currentState = climate.getCharacteristic(this.Characteristic.CurrentHeatingCoolingState);
+    if (!currentState.listenerCount('get')) {
+      currentState.onGet(() =>
+        this.zoneStatuses.get(zoneNumber)?.zone_power_state
+          ? this.Characteristic.CurrentHeatingCoolingState.HEAT
+          : this.Characteristic.CurrentHeatingCoolingState.OFF,
+      );
+    }
+
+    const targetState = climate.getCharacteristic(this.Characteristic.TargetHeatingCoolingState);
+    targetState.setProps({
+      validValues: [
+        this.Characteristic.TargetHeatingCoolingState.OFF,
+        this.Characteristic.TargetHeatingCoolingState.AUTO,
+      ],
+    });
+    if (!targetState.listenerCount('get') && !targetState.listenerCount('set')) {
+      targetState
+        .onGet(() =>
+          this.zoneStatuses.get(zoneNumber)?.zone_power_state
+            ? this.Characteristic.TargetHeatingCoolingState.AUTO
+            : this.Characteristic.TargetHeatingCoolingState.OFF,
+        )
+        .onSet((value: CharacteristicValue) => {
+          this.airtouch?.zoneSetActive(
+            zoneNumber,
+            Number(value) !== this.Characteristic.TargetHeatingCoolingState.OFF,
+          );
+        });
+    }
+
+    // HomeKit requires TargetTemperature on a Thermostat. It mirrors the live
+    // room temperature and is not used to control AirTouch.
+    const targetTemperature = climate.getCharacteristic(this.Characteristic.TargetTemperature);
+    targetTemperature.setProps({ minValue: 5, maxValue: 35, minStep: 0.5 });
+    if (!targetTemperature.listenerCount('get') && !targetTemperature.listenerCount('set')) {
+      targetTemperature
+        .onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_temp ?? 20)
+        .onSet(() => {
+          targetTemperature.updateValue(this.zoneStatuses.get(zoneNumber)?.zone_temp ?? 20);
+        });
+    }
+
+    let airVent = accessory.getServiceById(this.Service.Fanv2, 'air-vent');
     if (!airVent) {
-      airVent = accessory.addService(this.Service.Fanv2, `${name} Air Vent`, 'damper');
+      airVent = accessory.addService(this.Service.Fanv2, `${name} Air Vent`, 'air-vent');
     }
     this.setServiceName(airVent, `${name} Air Vent`);
-    temperature.addLinkedService(airVent);
+    climate.addLinkedService(airVent);
 
     const active = airVent.getCharacteristic(this.Characteristic.Active);
     if (!active.listenerCount('get') && !active.listenerCount('set')) {
       active
-        .onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_power_state
-          ? this.Characteristic.Active.ACTIVE
-          : this.Characteristic.Active.INACTIVE)
+        .onGet(() =>
+          this.zoneStatuses.get(zoneNumber)?.zone_power_state
+            ? this.Characteristic.Active.ACTIVE
+            : this.Characteristic.Active.INACTIVE,
+        )
         .onSet((value: CharacteristicValue) => {
           this.airtouch?.zoneSetActive(
             zoneNumber,
@@ -368,23 +415,7 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
         });
     }
 
-    let zoneSwitch = accessory.getServiceById(this.Service.Switch, 'zone-power');
-    if (!zoneSwitch) {
-      zoneSwitch = accessory.addService(this.Service.Switch, `${name} On / Off`, 'zone-power');
-    }
-    this.setServiceName(zoneSwitch, `${name} On / Off`);
-    temperature.addLinkedService(zoneSwitch);
-
-    const on = zoneSwitch.getCharacteristic(this.Characteristic.On);
-    if (!on.listenerCount('get') && !on.listenerCount('set')) {
-      on
-        .onGet(() => Boolean(this.zoneStatuses.get(zoneNumber)?.zone_power_state))
-        .onSet((value: CharacteristicValue) => {
-          this.airtouch?.zoneSetActive(zoneNumber, Boolean(value));
-        });
-    }
-
-    // Remove any temporary separate temperature accessory from the earlier layout.
+    // Remove any temporary standalone temperature accessory from earlier layouts.
     const separateTemperature = this.accessories.find((item) =>
       item.context.kind === 'temperature' && item.context.zoneNumber === zoneNumber,
     );
@@ -430,13 +461,23 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
       item.context.kind === 'zone' && item.context.zoneNumber === zoneNumber,
     );
 
-    accessory?.getServiceById(this.Service.TemperatureSensor, 'room-temperature')
-      ?.updateCharacteristic(this.Characteristic.CurrentTemperature, status.zone_temp);
+    const climate = accessory?.getServiceById(this.Service.Thermostat, 'room-climate');
+    climate?.updateCharacteristic(this.Characteristic.CurrentTemperature, status.zone_temp);
+    climate?.updateCharacteristic(this.Characteristic.TargetTemperature, status.zone_temp);
+    climate?.updateCharacteristic(
+      this.Characteristic.TargetHeatingCoolingState,
+      status.zone_power_state
+        ? this.Characteristic.TargetHeatingCoolingState.AUTO
+        : this.Characteristic.TargetHeatingCoolingState.OFF,
+    );
+    climate?.updateCharacteristic(
+      this.Characteristic.CurrentHeatingCoolingState,
+      status.zone_power_state
+        ? this.Characteristic.CurrentHeatingCoolingState.HEAT
+        : this.Characteristic.CurrentHeatingCoolingState.OFF,
+    );
 
-    accessory?.getServiceById(this.Service.Switch, 'zone-power')
-      ?.updateCharacteristic(this.Characteristic.On, Boolean(status.zone_power_state));
-
-    const airVent = accessory?.getServiceById(this.Service.Fanv2, 'damper');
+    const airVent = accessory?.getServiceById(this.Service.Fanv2, 'air-vent');
     airVent?.updateCharacteristic(
       this.Characteristic.Active,
       status.zone_power_state ? this.Characteristic.Active.ACTIVE : this.Characteristic.Active.INACTIVE,
