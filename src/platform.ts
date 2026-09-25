@@ -246,9 +246,9 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
     for (const [speed, label] of speeds) {
       let service = accessory.getServiceById(this.Service.Switch, `fan-${speed}`);
       if (!service) {
-        service = accessory.addService(this.Service.Switch, `Fan ${label}`, `fan-${speed}`);
+        service = accessory.addService(this.Service.Switch, `System Fan ${label}`, `fan-${speed}`);
       }
-      this.setServiceName(service, `AirTouch Fan ${label}`);
+      this.setServiceName(service, `System Fan ${label}`);
       if (!service.getCharacteristic(this.Characteristic.On).listenerCount('set')) {
         service.getCharacteristic(this.Characteristic.On)
           .onGet(() => this.acStatus?.ac_fan_speed === speed)
@@ -321,9 +321,9 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
 
     let zoneSwitch = accessory.getServiceById(this.Service.Switch, 'zone-power');
     if (!zoneSwitch) {
-      zoneSwitch = accessory.addService(this.Service.Switch, `${name} Zone`, 'zone-power');
+      zoneSwitch = accessory.addService(this.Service.Switch, `${name} On / Off`, 'zone-power');
     }
-    this.setServiceName(zoneSwitch, `${name} Zone`);
+    this.setServiceName(zoneSwitch, `${name} On / Off`);
     damper.addLinkedService(zoneSwitch);
 
     const on = zoneSwitch.getCharacteristic(this.Characteristic.On);
