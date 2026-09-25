@@ -330,6 +330,12 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
     this.setServiceName(damper, `${name} Air Vent`);
     damper.setPrimaryService();
 
+    damper.addOptionalCharacteristic(this.Characteristic.CurrentTemperature);
+    const roomTemperature = damper.getCharacteristic(this.Characteristic.CurrentTemperature);
+    if (!roomTemperature.listenerCount('get')) {
+      roomTemperature.onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_temp ?? 20);
+    }
+
     const active = damper.getCharacteristic(this.Characteristic.Active);
     if (!active.listenerCount('get') && !active.listenerCount('set')) {
       active
@@ -437,6 +443,7 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
       status.zone_power_state ? this.Characteristic.Active.ACTIVE : this.Characteristic.Active.INACTIVE,
     );
     damper?.updateCharacteristic(this.Characteristic.RotationSpeed, status.zone_damper_position);
+    damper?.updateCharacteristic(this.Characteristic.CurrentTemperature, status.zone_temp);
 
     const temperatureAccessory = this.accessories.find((item) =>
       item.context.kind === 'temperature' && item.context.zoneNumber === zoneNumber,
