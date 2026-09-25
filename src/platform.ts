@@ -159,8 +159,10 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
         if (
           service.UUID === this.Service.Switch.UUID
           || service.UUID === this.Service.TemperatureSensor.UUID
+          || service.UUID === this.Service.Fanv2.UUID
           || service.UUID === this.Service.WindowCovering.UUID
           || service.UUID === this.Service.Thermostat.UUID
+          || service.UUID === this.Service.HeaterCooler.UUID
         ) {
           accessory.removeService(service);
         }
@@ -289,6 +291,7 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
       zoneSwitch = accessory.addService(this.Service.Switch, `${name} Zone`, 'zone-power');
     }
     this.setServiceName(zoneSwitch, `${name} Zone`);
+    zoneSwitch.setPrimaryService();
     const on = zoneSwitch.getCharacteristic(this.Characteristic.On);
     if (!on.listenerCount('get') && !on.listenerCount('set')) {
       on
@@ -307,6 +310,7 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
       );
     }
     this.setServiceName(temperature, `${name} Temperature`);
+    zoneSwitch.addLinkedService(temperature);
     const currentTemperature = temperature.getCharacteristic(this.Characteristic.CurrentTemperature);
     if (!currentTemperature.listenerCount('get')) {
       currentTemperature.onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_temp ?? 20);
@@ -317,6 +321,7 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
       damper = accessory.addService(this.Service.Fanv2, `${name} Damper`, 'damper');
     }
     this.setServiceName(damper, `${name} Damper`);
+    zoneSwitch.addLinkedService(damper);
 
     const active = damper.getCharacteristic(this.Characteristic.Active);
     if (!active.listenerCount('get') && !active.listenerCount('set')) {
