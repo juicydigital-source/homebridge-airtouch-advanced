@@ -289,22 +289,29 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
     }
     this.setServiceName(room, name);
 
-    room.getCharacteristic(this.Characteristic.Active)
-      .onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_power_state
-        ? this.Characteristic.Active.ACTIVE
-        : this.Characteristic.Active.INACTIVE)
-      .onSet((value: CharacteristicValue) => {
-        this.airtouch?.zoneSetActive(
-          zoneNumber,
-          Number(value) === this.Characteristic.Active.ACTIVE,
-        );
-      });
+    const active = room.getCharacteristic(this.Characteristic.Active);
+    if (!active.listenerCount('get') && !active.listenerCount('set')) {
+      active
+        .onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_power_state
+          ? this.Characteristic.Active.ACTIVE
+          : this.Characteristic.Active.INACTIVE)
+        .onSet((value: CharacteristicValue) => {
+          this.airtouch?.zoneSetActive(
+            zoneNumber,
+            Number(value) === this.Characteristic.Active.ACTIVE,
+          );
+        });
+    }
 
-    room.getCharacteristic(this.Characteristic.CurrentTemperature)
-      .onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_temp ?? 20);
+    const currentTemperature = room.getCharacteristic(this.Characteristic.CurrentTemperature);
+    if (!currentTemperature.listenerCount('get')) {
+      currentTemperature.onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_temp ?? 20);
+    }
 
-    room.getCharacteristic(this.Characteristic.CurrentHeaterCoolerState)
-      .onGet(() => this.getZoneCurrentHeaterCoolerState(zoneNumber));
+    const currentState = room.getCharacteristic(this.Characteristic.CurrentHeaterCoolerState);
+    if (!currentState.listenerCount('get')) {
+      currentState.onGet(() => this.getZoneCurrentHeaterCoolerState(zoneNumber));
+    }
 
     // Room mode follows the main AirTouch system. Restrict this room-level
     // characteristic to AUTO so it doesn't present itself as an independent
@@ -313,11 +320,13 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
     targetState.setProps({
       validValues: [this.Characteristic.TargetHeaterCoolerState.AUTO],
     });
-    targetState
-      .onGet(() => this.Characteristic.TargetHeaterCoolerState.AUTO)
-      .onSet(() => {
-        targetState.updateValue(this.Characteristic.TargetHeaterCoolerState.AUTO);
-      });
+    if (!targetState.listenerCount('get') && !targetState.listenerCount('set')) {
+      targetState
+        .onGet(() => this.Characteristic.TargetHeaterCoolerState.AUTO)
+        .onSet(() => {
+          targetState.updateValue(this.Characteristic.TargetHeaterCoolerState.AUTO);
+        });
+    }
 
     // HomeKit renders RotationSpeed as a draggable percentage control. For
     // AirTouch this is the room damper opening, in the controller's 5% steps.
@@ -327,12 +336,14 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
       maxValue: 100,
       minStep: 5,
     });
-    damper
-      .onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_damper_position ?? 0)
-      .onSet((value: CharacteristicValue) => {
-        const rounded = Math.max(0, Math.min(100, Math.round(Number(value) / 5) * 5));
-        this.airtouch?.zoneSetPercentage(zoneNumber, rounded);
-      });
+    if (!damper.listenerCount('get') && !damper.listenerCount('set')) {
+      damper
+        .onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_damper_position ?? 0)
+        .onSet((value: CharacteristicValue) => {
+          const rounded = Math.max(0, Math.min(100, Math.round(Number(value) / 5) * 5));
+          this.airtouch?.zoneSetPercentage(zoneNumber, rounded);
+        });
+    }
   }
 
   private getZoneCurrentHeaterCoolerState(zoneNumber: number): number {
