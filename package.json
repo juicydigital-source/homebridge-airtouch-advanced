@@ -2,7 +2,7 @@
   "name": "homebridge-airtouch-advanced",
   "displayName": "AirTouch Advanced",
   "type": "module",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Advanced local AirTouch integration for Homebridge with room, damper, temperature and fan controls.",
   "author": "Juicy Digital",
   "license": "MIT",
