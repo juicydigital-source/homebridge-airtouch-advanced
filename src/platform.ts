@@ -270,30 +270,43 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
       { kind: 'zone', zoneNumber },
     );
 
-    // Remove older experimental room layouts. A room is now represented by
-    // a temperature-first service plus a linked native Fanv2 damper control.
+    // Keep the room model simple and automation-friendly:
+    // Switch = zone on/off
+    // TemperatureSensor = current room temperature
+    // Fanv2 RotationSpeed = damper percentage
     for (const service of [...accessory.services]) {
       if (
         service.UUID === this.Service.HeaterCooler.UUID
         || service.UUID === this.Service.Thermostat.UUID
-        || service.UUID === this.Service.Switch.UUID
         || service.UUID === this.Service.WindowCovering.UUID
       ) {
         accessory.removeService(service);
       }
     }
 
+    let zoneSwitch = accessory.getServiceById(this.Service.Switch, 'zone-power');
+    if (!zoneSwitch) {
+      zoneSwitch = accessory.addService(this.Service.Switch, `${name} Zone`, 'zone-power');
+    }
+    this.setServiceName(zoneSwitch, `${name} Zone`);
+    const on = zoneSwitch.getCharacteristic(this.Characteristic.On);
+    if (!on.listenerCount('get') && !on.listenerCount('set')) {
+      on
+        .onGet(() => Boolean(this.zoneStatuses.get(zoneNumber)?.zone_power_state))
+        .onSet((value: CharacteristicValue) => {
+          this.airtouch?.zoneSetActive(zoneNumber, Boolean(value));
+        });
+    }
+
     let temperature = accessory.getServiceById(this.Service.TemperatureSensor, 'room-temperature');
     if (!temperature) {
       temperature = accessory.addService(
         this.Service.TemperatureSensor,
-        name,
+        `${name} Temperature`,
         'room-temperature',
       );
     }
-    this.setServiceName(temperature, name);
-    temperature.setPrimaryService();
-
+    this.setServiceName(temperature, `${name} Temperature`);
     const currentTemperature = temperature.getCharacteristic(this.Characteristic.CurrentTemperature);
     if (!currentTemperature.listenerCount('get')) {
       currentTemperature.onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_temp ?? 20);
@@ -329,42 +342,6 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
           this.airtouch?.zoneSetPercentage(zoneNumber, rounded);
         });
     }
-
-    temperature.addLinkedService(damper);
-  }
-
-  private getZoneCurrentThermostatState(zoneNumber: number): number {
-    const zone = this.zoneStatuses.get(zoneNumber);
-    if (!zone?.zone_power_state || !this.acStatus?.ac_power_state) {
-      return this.Characteristic.CurrentHeatingCoolingState.OFF;
-    }
-
-    if (this.acStatus.ac_mode === MAGIC.AC_MODES.HEAT) {
-      return this.Characteristic.CurrentHeatingCoolingState.HEAT;
-    }
-
-    if (this.acStatus.ac_mode === MAGIC.AC_MODES.COOL) {
-      return this.Characteristic.CurrentHeatingCoolingState.COOL;
-    }
-
-    return this.Characteristic.CurrentHeatingCoolingState.OFF;
-  }
-
-  private getZoneCurrentHeaterCoolerState(zoneNumber: number): number {
-    const zone = this.zoneStatuses.get(zoneNumber);
-    if (!zone?.zone_power_state || !this.acStatus?.ac_power_state) {
-      return this.Characteristic.CurrentHeaterCoolerState.INACTIVE;
-    }
-
-    if (this.acStatus.ac_mode === MAGIC.AC_MODES.HEAT) {
-      return this.Characteristic.CurrentHeaterCoolerState.HEATING;
-    }
-
-    if (this.acStatus.ac_mode === MAGIC.AC_MODES.COOL) {
-      return this.Characteristic.CurrentHeaterCoolerState.COOLING;
-    }
-
-    return this.Characteristic.CurrentHeaterCoolerState.IDLE;
   }
 
   private setServiceName(service: Service, name: string) {
@@ -404,6 +381,9 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
     const accessory = this.accessories.find((item) =>
       item.context.kind === 'zone' && item.context.zoneNumber === zoneNumber,
     );
+
+    accessory?.getServiceById(this.Service.Switch, 'zone-power')
+      ?.updateCharacteristic(this.Characteristic.On, Boolean(status.zone_power_state));
 
     accessory?.getServiceById(this.Service.TemperatureSensor, 'room-temperature')
       ?.updateCharacteristic(this.Characteristic.CurrentTemperature, status.zone_temp);
