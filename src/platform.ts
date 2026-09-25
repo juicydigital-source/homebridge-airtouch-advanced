@@ -179,6 +179,7 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
     }
 
     accessory.getService(this.Service.AccessoryInformation)!
+      .setCharacteristic(this.Characteristic.Name, displayName)
       .setCharacteristic(this.Characteristic.Manufacturer, 'Polyaire')
       .setCharacteristic(this.Characteristic.Model, 'AirTouch 5')
       .setCharacteristic(this.Characteristic.SerialNumber, `AirTouch-${key}`);
@@ -199,6 +200,9 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
     let thermostat = accessory.getService(this.Service.Thermostat);
     if (!thermostat) {
       thermostat = accessory.addService(this.Service.Thermostat, 'AirTouch System');
+    }
+    this.setServiceName(thermostat, 'AirTouch System');
+    if (!thermostat.getCharacteristic(this.Characteristic.TargetHeatingCoolingState).listenerCount('set')) {
       thermostat.setCharacteristic(
         this.Characteristic.TemperatureDisplayUnits,
         this.Characteristic.TemperatureDisplayUnits.CELSIUS,
@@ -233,6 +237,9 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
       let service = accessory.getServiceById(this.Service.Switch, `fan-${speed}`);
       if (!service) {
         service = accessory.addService(this.Service.Switch, `Fan ${label}`, `fan-${speed}`);
+      }
+      this.setServiceName(service, `AirTouch Fan ${label}`);
+      if (!service.getCharacteristic(this.Characteristic.On).listenerCount('set')) {
         service.getCharacteristic(this.Characteristic.On)
           .onGet(() => this.acStatus?.ac_fan_speed === speed)
           .onSet((value: CharacteristicValue) => {
@@ -261,6 +268,9 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
     let switchService = accessory.getService(this.Service.Switch);
     if (!switchService) {
       switchService = accessory.addService(this.Service.Switch, `${name} On/Off`);
+    }
+    this.setServiceName(switchService, `${name} On/Off`);
+    if (!switchService.getCharacteristic(this.Characteristic.On).listenerCount('set')) {
       switchService.getCharacteristic(this.Characteristic.On)
         .onGet(() => Boolean(this.zoneStatuses.get(zoneNumber)?.zone_power_state))
         .onSet((value: CharacteristicValue) => {
@@ -278,11 +288,14 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
       temperatureService.getCharacteristic(this.Characteristic.CurrentTemperature)
         .onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_temp ?? 20);
     }
+    this.setServiceName(temperatureService, `${name} Temperature`);
 
     let vent = accessory.getServiceById(this.Service.WindowCovering, 'vent');
     if (!vent) {
       vent = accessory.addService(this.Service.WindowCovering, `${name} Vent`, 'vent');
-
+    }
+    this.setServiceName(vent, `${name} Vent`);
+    if (!vent.getCharacteristic(this.Characteristic.TargetPosition).listenerCount('set')) {
       vent.getCharacteristic(this.Characteristic.CurrentPosition)
         .onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_damper_position ?? 0);
 
@@ -296,6 +309,12 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
       vent.getCharacteristic(this.Characteristic.PositionState)
         .onGet(() => this.Characteristic.PositionState.STOPPED);
     }
+  }
+
+  private setServiceName(service: Service, name: string) {
+    service.setCharacteristic(this.Characteristic.Name, name);
+    service.addOptionalCharacteristic(this.Characteristic.ConfiguredName);
+    service.setCharacteristic(this.Characteristic.ConfiguredName, name);
   }
 
   private updateSystemAccessory() {
