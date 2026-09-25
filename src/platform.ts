@@ -20,10 +20,9 @@ import { MAGIC } from './airtouch/magic.js';
 import { PLUGIN_NAME, PLATFORM_NAME } from './settings.js';
 
 type AirTouchAccessoryContext = {
-  kind?: 'ac' | 'fan' | 'zone' | 'vent';
+  kind?: 'system' | 'zone' | 'ac' | 'fan' | 'vent';
   acNumber?: number;
   zoneNumber?: number;
-  fanSpeed?: number;
 };
 
 export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
@@ -66,7 +65,7 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
         ability.ac_support_fan_medium,
         ability.ac_support_fan_high,
       );
-      this.ensureAcAccessories();
+      this.ensureSystemAccessory();
     });
 
     this.emitter.on('ac_status', (status: AcStatus) => {
@@ -85,32 +84,28 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
         status.ac_temp,
         status.ac_error_code,
       );
-      this.ensureAcAccessories();
-      this.updateAcAccessories();
-      this.updateAllZoneAccessories();
+      this.ensureSystemAccessory();
+      this.updateSystemAccessory();
     });
 
     this.emitter.on('zone_status', (status: ZoneStatus) => {
       this.zoneStatuses.set(status.zone_number, status);
       this.log.info(
-        'READ | Zone %d | power:%s damper:%d%% control:%s target:%sC temp:%sC sensor:%s',
+        'READ | Zone %d | power:%s damper:%d%% temp:%sC',
         status.zone_number,
         status.zone_power_state ? 'On' : 'Off',
         status.zone_damper_position,
-        status.zone_control_type === 1 ? 'Temperature' : 'Percentage',
-        status.zone_target,
         status.zone_temp,
-        status.zone_has_sensor ? 'Yes' : 'No',
       );
-      this.ensureZoneAccessories(status.zone_number);
-      this.updateZoneAccessories(status.zone_number);
+      this.ensureZoneAccessory(status.zone_number);
+      this.updateZoneAccessory(status.zone_number);
     });
 
     this.emitter.on('zone_name', (zoneNumber: number, zoneName: string) => {
       this.zoneNames.set(zoneNumber, zoneName);
       this.log.info('READ | Zone %d name: "%s"', zoneNumber, zoneName);
-      this.ensureZoneAccessories(zoneNumber);
-      this.updateZoneAccessories(zoneNumber);
+      this.ensureZoneAccessory(zoneNumber);
+      this.updateZoneAccessory(zoneNumber);
     });
 
     this.emitter.on('attempt_reconnect', () => {
@@ -121,10 +116,12 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
     if (this.config.host) {
       this.log.info('AirTouch controller configured at %s', this.config.host);
     } else {
-      this.log.warn('No AirTouch host configured yet. Open plugin settings and enter the controller IP address.');
+      this.log.warn('No AirTouch host configured.');
     }
 
     this.api.on('didFinishLaunching', () => {
+      this.cleanupLegacyAccessories();
+
       const host = typeof this.config.host === 'string' ? this.config.host.trim() : '';
       if (!host) {
         return;
@@ -139,6 +136,28 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
   configureAccessory(accessory: PlatformAccessory<AirTouchAccessoryContext>) {
     this.log.info('Restoring cached accessory: %s', accessory.displayName);
     this.accessories.push(accessory);
+  }
+
+  private cleanupLegacyAccessories() {
+    const legacy = this.accessories.filter((accessory) =>
+      accessory.context.kind === 'ac'
+      || accessory.context.kind === 'fan'
+      || accessory.context.kind === 'vent',
+    );
+
+    if (legacy.length) {
+      this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, legacy);
+      for (const item of legacy) {
+        const i = this.accessories.indexOf(item);
+        if (i >= 0) this.accessories.splice(i, 1);
+      }
+      this.log.info('Removed %d legacy AirTouch accessories.', legacy.length);
+    }
+
+    for (const accessory of this.accessories.filter((item) => item.context.kind === 'zone')) {
+      const thermostat = accessory.getService(this.Service.Thermostat);
+      if (thermostat) accessory.removeService(thermostat);
+    }
   }
 
   private getOrCreateAccessory(
@@ -167,36 +186,33 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
     return accessory;
   }
 
-  private ensureAcAccessories() {
-    if (!this.acAbility && !this.acStatus) {
-      return;
-    }
+  private ensureSystemAccessory() {
+    if (!this.acAbility && !this.acStatus) return;
 
     const acNumber = this.acStatus?.ac_unit_number ?? this.acAbility?.ac_unit_number ?? 0;
-    const acName = this.acAbility?.ac_name?.trim() || 'AirTouch AC';
-
-    const thermostatAccessory = this.getOrCreateAccessory(
-      acName,
-      `ac-${acNumber}`,
-      { kind: 'ac', acNumber },
+    const accessory = this.getOrCreateAccessory(
+      'AirTouch System',
+      `system-${acNumber}`,
+      { kind: 'system', acNumber },
     );
-    let thermostat = thermostatAccessory.getService(this.Service.Thermostat);
+
+    let thermostat = accessory.getService(this.Service.Thermostat);
     if (!thermostat) {
-      thermostat = thermostatAccessory.addService(this.Service.Thermostat, acName);
+      thermostat = accessory.addService(this.Service.Thermostat, 'AirTouch System');
       thermostat.setCharacteristic(
         this.Characteristic.TemperatureDisplayUnits,
         this.Characteristic.TemperatureDisplayUnits.CELSIUS,
       );
 
       thermostat.getCharacteristic(this.Characteristic.TargetHeatingCoolingState)
-        .onGet(() => this.getAcTargetMode())
-        .onSet((value) => {
+        .onGet(() => this.getSystemTargetMode())
+        .onSet((value: CharacteristicValue) => {
           this.airtouch?.acSetTargetHeatingCoolingState(acNumber, Number(value));
         });
 
       thermostat.getCharacteristic(this.Characteristic.TargetTemperature)
         .onGet(() => this.acStatus?.ac_target ?? 20)
-        .onSet((value) => {
+        .onSet((value: CharacteristicValue) => {
           this.airtouch?.acSetTargetTemperature(acNumber, Number(value));
         });
 
@@ -204,24 +220,19 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
         .onGet(() => this.acStatus?.ac_temp ?? 20);
 
       thermostat.getCharacteristic(this.Characteristic.CurrentHeatingCoolingState)
-        .onGet(() => this.getAcCurrentMode());
+        .onGet(() => this.getSystemCurrentMode());
     }
 
-    const supportedFanSpeeds: Array<[number, string]> = [];
-    if (this.acAbility?.ac_support_fan_auto) supportedFanSpeeds.push([MAGIC.AC_FAN_SPEEDS.AUTO, 'Auto']);
-    if (this.acAbility?.ac_support_fan_low) supportedFanSpeeds.push([MAGIC.AC_FAN_SPEEDS.LOW, 'Low']);
-    if (this.acAbility?.ac_support_fan_medium) supportedFanSpeeds.push([MAGIC.AC_FAN_SPEEDS.MEDIUM, 'Medium']);
-    if (this.acAbility?.ac_support_fan_high) supportedFanSpeeds.push([MAGIC.AC_FAN_SPEEDS.HIGH, 'High']);
+    const speeds: Array<[number, string]> = [];
+    if (this.acAbility?.ac_support_fan_auto) speeds.push([MAGIC.AC_FAN_SPEEDS.AUTO, 'Auto']);
+    if (this.acAbility?.ac_support_fan_low) speeds.push([MAGIC.AC_FAN_SPEEDS.LOW, 'Low']);
+    if (this.acAbility?.ac_support_fan_medium) speeds.push([MAGIC.AC_FAN_SPEEDS.MEDIUM, 'Medium']);
+    if (this.acAbility?.ac_support_fan_high) speeds.push([MAGIC.AC_FAN_SPEEDS.HIGH, 'High']);
 
-    for (const [speed, label] of supportedFanSpeeds) {
-      const fanAccessory = this.getOrCreateAccessory(
-        `AirTouch Fan ${label}`,
-        `fan-${acNumber}-${speed}`,
-        { kind: 'fan', acNumber, fanSpeed: speed },
-      );
-      let service = fanAccessory.getService(this.Service.Switch);
+    for (const [speed, label] of speeds) {
+      let service = accessory.getServiceById(this.Service.Switch, `fan-${speed}`);
       if (!service) {
-        service = fanAccessory.addService(this.Service.Switch, `AirTouch Fan ${label}`);
+        service = accessory.addService(this.Service.Switch, `Fan ${label}`, `fan-${speed}`);
         service.getCharacteristic(this.Characteristic.On)
           .onGet(() => this.acStatus?.ac_fan_speed === speed)
           .onSet((value: CharacteristicValue) => {
@@ -233,22 +244,23 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
     }
   }
 
-  private ensureZoneAccessories(zoneNumber: number) {
+  private ensureZoneAccessory(zoneNumber: number) {
     const status = this.zoneStatuses.get(zoneNumber);
     const name = this.zoneNames.get(zoneNumber);
-    if (!status || !name) {
-      return;
-    }
+    if (!status || !name) return;
 
-    const zoneAccessory = this.getOrCreateAccessory(
+    const accessory = this.getOrCreateAccessory(
       name,
       `zone-${zoneNumber}`,
       { kind: 'zone', zoneNumber },
     );
 
-    let switchService = zoneAccessory.getService(this.Service.Switch);
+    const oldThermostat = accessory.getService(this.Service.Thermostat);
+    if (oldThermostat) accessory.removeService(oldThermostat);
+
+    let switchService = accessory.getService(this.Service.Switch);
     if (!switchService) {
-      switchService = zoneAccessory.addService(this.Service.Switch, `${name} Zone`);
+      switchService = accessory.addService(this.Service.Switch, `${name} On/Off`);
       switchService.getCharacteristic(this.Characteristic.On)
         .onGet(() => Boolean(this.zoneStatuses.get(zoneNumber)?.zone_power_state))
         .onSet((value: CharacteristicValue) => {
@@ -256,145 +268,84 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
         });
     }
 
-    let thermostat = zoneAccessory.getService(this.Service.Thermostat);
-    if (!thermostat) {
-      thermostat = zoneAccessory.addService(this.Service.Thermostat, name, 'climate');
-      thermostat.setCharacteristic(
-        this.Characteristic.TemperatureDisplayUnits,
-        this.Characteristic.TemperatureDisplayUnits.CELSIUS,
+    let temperatureService = accessory.getServiceById(this.Service.TemperatureSensor, 'temperature');
+    if (!temperatureService) {
+      temperatureService = accessory.addService(
+        this.Service.TemperatureSensor,
+        `${name} Temperature`,
+        'temperature',
       );
-
-      thermostat.getCharacteristic(this.Characteristic.CurrentTemperature)
+      temperatureService.getCharacteristic(this.Characteristic.CurrentTemperature)
         .onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_temp ?? 20);
-
-      thermostat.getCharacteristic(this.Characteristic.TargetTemperature)
-        .onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_target ?? 20)
-        .onSet((value: CharacteristicValue) => {
-          this.airtouch?.zoneSetTargetTemperature(zoneNumber, Number(value));
-        });
-
-      thermostat.getCharacteristic(this.Characteristic.CurrentHeatingCoolingState)
-        .onGet(() => this.getZoneCurrentMode(zoneNumber));
-
-      thermostat.getCharacteristic(this.Characteristic.TargetHeatingCoolingState)
-        .onGet(() => this.getZoneTargetMode(zoneNumber))
-        .onSet((value: CharacteristicValue) => {
-          const target = Number(value);
-          if (target === this.Characteristic.TargetHeatingCoolingState.OFF) {
-            this.airtouch?.zoneSetActive(zoneNumber, false);
-            return;
-          }
-
-          this.airtouch?.zoneSetActive(zoneNumber, true);
-          this.airtouch?.acSetTargetHeatingCoolingState(0, target);
-        });
     }
 
-    if (status.zone_has_sensor) {
-      let temperatureService = zoneAccessory.getServiceById(this.Service.TemperatureSensor, 'temperature');
-      if (!temperatureService) {
-        temperatureService = zoneAccessory.addService(
-          this.Service.TemperatureSensor,
-          `${name} Temperature`,
-          'temperature',
-        );
-        temperatureService.getCharacteristic(this.Characteristic.CurrentTemperature)
-          .onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_temp ?? 20);
-      }
-    }
+    let vent = accessory.getServiceById(this.Service.WindowCovering, 'vent');
+    if (!vent) {
+      vent = accessory.addService(this.Service.WindowCovering, `${name} Vent`, 'vent');
 
-    const ventAccessory = this.getOrCreateAccessory(
-      `${name} Vent`,
-      `vent-${zoneNumber}`,
-      { kind: 'vent', zoneNumber },
-    );
-    let ventService = ventAccessory.getService(this.Service.WindowCovering);
-    if (!ventService) {
-      ventService = ventAccessory.addService(this.Service.WindowCovering, `${name} Vent`);
-
-      ventService.getCharacteristic(this.Characteristic.CurrentPosition)
+      vent.getCharacteristic(this.Characteristic.CurrentPosition)
         .onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_damper_position ?? 0);
 
-      ventService.getCharacteristic(this.Characteristic.TargetPosition)
+      vent.getCharacteristic(this.Characteristic.TargetPosition)
         .onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_damper_position ?? 0)
         .onSet((value: CharacteristicValue) => {
-          const requested = Number(value);
-          const rounded = Math.max(0, Math.min(100, Math.round(requested / 5) * 5));
+          const rounded = Math.max(0, Math.min(100, Math.round(Number(value) / 5) * 5));
           this.airtouch?.zoneSetPercentage(zoneNumber, rounded);
         });
 
-      ventService.getCharacteristic(this.Characteristic.PositionState)
+      vent.getCharacteristic(this.Characteristic.PositionState)
         .onGet(() => this.Characteristic.PositionState.STOPPED);
     }
   }
 
-  private updateAcAccessories() {
-    if (!this.acStatus) {
-      return;
-    }
+  private updateSystemAccessory() {
+    if (!this.acStatus) return;
 
-    const acNumber = this.acStatus.ac_unit_number;
-    const acAccessory = this.findAccessory('ac', acNumber);
-    const thermostat = acAccessory?.getService(this.Service.Thermostat);
+    const accessory = this.accessories.find((item) =>
+      item.context.kind === 'system' && item.context.acNumber === this.acStatus!.ac_unit_number,
+    );
+
+    const thermostat = accessory?.getService(this.Service.Thermostat);
     thermostat?.updateCharacteristic(this.Characteristic.CurrentTemperature, this.acStatus.ac_temp);
     thermostat?.updateCharacteristic(this.Characteristic.TargetTemperature, this.acStatus.ac_target);
-    thermostat?.updateCharacteristic(this.Characteristic.CurrentHeatingCoolingState, this.getAcCurrentMode());
-    thermostat?.updateCharacteristic(this.Characteristic.TargetHeatingCoolingState, this.getAcTargetMode());
+    thermostat?.updateCharacteristic(this.Characteristic.CurrentHeatingCoolingState, this.getSystemCurrentMode());
+    thermostat?.updateCharacteristic(this.Characteristic.TargetHeatingCoolingState, this.getSystemTargetMode());
 
-    for (const accessory of this.accessories.filter((item) => item.context.kind === 'fan')) {
-      const speed = accessory.context.fanSpeed;
-      if (speed === undefined) continue;
-      accessory.getService(this.Service.Switch)
+    for (const speed of [
+      MAGIC.AC_FAN_SPEEDS.AUTO,
+      MAGIC.AC_FAN_SPEEDS.LOW,
+      MAGIC.AC_FAN_SPEEDS.MEDIUM,
+      MAGIC.AC_FAN_SPEEDS.HIGH,
+    ]) {
+      accessory?.getServiceById(this.Service.Switch, `fan-${speed}`)
         ?.updateCharacteristic(this.Characteristic.On, this.acStatus.ac_fan_speed === speed);
     }
   }
 
-  private updateAllZoneAccessories() {
-    for (const zoneNumber of this.zoneStatuses.keys()) {
-      this.updateZoneAccessories(zoneNumber);
-    }
-  }
-
-  private updateZoneAccessories(zoneNumber: number) {
+  private updateZoneAccessory(zoneNumber: number) {
     const status = this.zoneStatuses.get(zoneNumber);
     if (!status) return;
 
-    const zoneAccessory = this.findAccessory('zone', zoneNumber);
-    zoneAccessory?.getService(this.Service.Switch)
+    const accessory = this.accessories.find((item) =>
+      item.context.kind === 'zone' && item.context.zoneNumber === zoneNumber,
+    );
+
+    accessory?.getService(this.Service.Switch)
       ?.updateCharacteristic(this.Characteristic.On, Boolean(status.zone_power_state));
 
-    const thermostat = zoneAccessory?.getService(this.Service.Thermostat);
-    thermostat?.updateCharacteristic(this.Characteristic.CurrentTemperature, status.zone_temp);
-    thermostat?.updateCharacteristic(this.Characteristic.TargetTemperature, status.zone_target);
-    thermostat?.updateCharacteristic(this.Characteristic.CurrentHeatingCoolingState, this.getZoneCurrentMode(zoneNumber));
-    thermostat?.updateCharacteristic(this.Characteristic.TargetHeatingCoolingState, this.getZoneTargetMode(zoneNumber));
-
-    zoneAccessory?.getServiceById(this.Service.TemperatureSensor, 'temperature')
+    accessory?.getServiceById(this.Service.TemperatureSensor, 'temperature')
       ?.updateCharacteristic(this.Characteristic.CurrentTemperature, status.zone_temp);
 
-    const ventAccessory = this.findAccessory('vent', zoneNumber);
-    const vent = ventAccessory?.getService(this.Service.WindowCovering);
+    const vent = accessory?.getServiceById(this.Service.WindowCovering, 'vent');
     vent?.updateCharacteristic(this.Characteristic.CurrentPosition, status.zone_damper_position);
     vent?.updateCharacteristic(this.Characteristic.TargetPosition, status.zone_damper_position);
     vent?.updateCharacteristic(this.Characteristic.PositionState, this.Characteristic.PositionState.STOPPED);
   }
 
-  private findAccessory(
-    kind: AirTouchAccessoryContext['kind'],
-    number: number,
-  ): PlatformAccessory<AirTouchAccessoryContext> | undefined {
-    return this.accessories.find((accessory) => {
-      if (accessory.context.kind !== kind) return false;
-      if (kind === 'ac') return accessory.context.acNumber === number;
-      return accessory.context.zoneNumber === number;
-    });
-  }
-
-  private getAcTargetMode(): number {
+  private getSystemTargetMode(): number {
     if (!this.acStatus?.ac_power_state) {
       return this.Characteristic.TargetHeatingCoolingState.OFF;
     }
-
     if (this.acStatus.ac_mode === MAGIC.AC_MODES.HEAT) {
       return this.Characteristic.TargetHeatingCoolingState.HEAT;
     }
@@ -404,11 +355,10 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
     return this.Characteristic.TargetHeatingCoolingState.AUTO;
   }
 
-  private getAcCurrentMode(): number {
+  private getSystemCurrentMode(): number {
     if (!this.acStatus?.ac_power_state) {
       return this.Characteristic.CurrentHeatingCoolingState.OFF;
     }
-
     if (this.acStatus.ac_mode === MAGIC.AC_MODES.HEAT) {
       return this.Characteristic.CurrentHeatingCoolingState.HEAT;
     }
@@ -416,22 +366,6 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
       return this.Characteristic.CurrentHeatingCoolingState.COOL;
     }
     return this.Characteristic.CurrentHeatingCoolingState.OFF;
-  }
-
-  private getZoneTargetMode(zoneNumber: number): number {
-    const zone = this.zoneStatuses.get(zoneNumber);
-    if (!zone?.zone_power_state || !this.acStatus?.ac_power_state) {
-      return this.Characteristic.TargetHeatingCoolingState.OFF;
-    }
-    return this.getAcTargetMode();
-  }
-
-  private getZoneCurrentMode(zoneNumber: number): number {
-    const zone = this.zoneStatuses.get(zoneNumber);
-    if (!zone?.zone_power_state || !this.acStatus?.ac_power_state) {
-      return this.Characteristic.CurrentHeatingCoolingState.OFF;
-    }
-    return this.getAcCurrentMode();
   }
 
   removeAccessory(accessory: PlatformAccessory<AirTouchAccessoryContext>) {
