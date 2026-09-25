@@ -1,0 +1,44 @@
+{
+  "name": "homebridge-airtouch-advanced",
+  "displayName": "AirTouch Advanced",
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Advanced local AirTouch integration for Homebridge with room, damper, temperature and fan controls.",
+  "author": "Juicy Digital",
+  "license": "MIT",
+  "homepage": "https://github.com/juicydigital-source/homebridge-airtouch-advanced#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/juicydigital-source/homebridge-airtouch-advanced.git"
+  },
+  "bugs": {
+    "url": "https://github.com/juicydigital-source/homebridge-airtouch-advanced/issues"
+  },
+  "keywords": [
+    "homebridge-plugin",
+    "supports-hap",
+    "airtouch",
+    "airtouch5",
+    "air-conditioning",
+    "homekit"
+  ],
+  "main": "dist/index.js",
+  "engines": {
+    "node": "^22.10.0 || ^24.0.0",
+    "homebridge": "^1.8.0 || ^2.0.0"
+  },
+  "scripts": {
+    "build": "rimraf ./dist && tsc",
+    "lint": "eslint . --max-warnings=0",
+    "prepublishOnly": "npm run lint && npm run build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.2.0",
+    "eslint": "^10.9.0",
+    "homebridge": "^2.4.0",
+    "rimraf": "^6.1.3",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.67.0"
+  }
+}
