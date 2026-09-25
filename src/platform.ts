@@ -270,26 +270,78 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
       { kind: 'zone', zoneNumber },
     );
 
-    // Remove services from the previous room layout so HomeKit sees one clean,
-    // climate-style room control instead of separate switch/temp/blind tiles.
+    // Clear the previous experimental room service so Apple Home gets the
+    // native controls that best match the requested behaviour.
     for (const service of [...accessory.services]) {
       if (
-        service.UUID === this.Service.Switch.UUID
-        || service.UUID === this.Service.TemperatureSensor.UUID
+        service.UUID === this.Service.HeaterCooler.UUID
+        || service.UUID === this.Service.Switch.UUID
         || service.UUID === this.Service.WindowCovering.UUID
-        || service.UUID === this.Service.Thermostat.UUID
+        || service.UUID === this.Service.TemperatureSensor.UUID
       ) {
         accessory.removeService(service);
       }
     }
 
-    let room = accessory.getService(this.Service.HeaterCooler);
-    if (!room) {
-      room = accessory.addService(this.Service.HeaterCooler, name, 'room-climate');
+    // Temperature-first room card. This keeps the current room temperature
+    // prominent in Apple Home. It is intentionally read-only for target temp:
+    // the main AirTouch System remains the only true HVAC controller.
+    let climate = accessory.getService(this.Service.Thermostat);
+    if (!climate) {
+      climate = accessory.addService(this.Service.Thermostat, name, 'room-temperature');
     }
-    this.setServiceName(room, name);
+    this.setServiceName(climate, name);
+    climate.setCharacteristic(
+      this.Characteristic.TemperatureDisplayUnits,
+      this.Characteristic.TemperatureDisplayUnits.CELSIUS,
+    );
 
-    const active = room.getCharacteristic(this.Characteristic.Active);
+    const currentTemperature = climate.getCharacteristic(this.Characteristic.CurrentTemperature);
+    if (!currentTemperature.listenerCount('get')) {
+      currentTemperature.onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_temp ?? 20);
+    }
+
+    const currentState = climate.getCharacteristic(this.Characteristic.CurrentHeatingCoolingState);
+    if (!currentState.listenerCount('get')) {
+      currentState.onGet(() => this.getZoneCurrentThermostatState(zoneNumber));
+    }
+
+    const targetState = climate.getCharacteristic(this.Characteristic.TargetHeatingCoolingState);
+    targetState.setProps({
+      validValues: [this.Characteristic.TargetHeatingCoolingState.OFF, this.Characteristic.TargetHeatingCoolingState.AUTO],
+    });
+    if (!targetState.listenerCount('get') && !targetState.listenerCount('set')) {
+      targetState
+        .onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_power_state
+          ? this.Characteristic.TargetHeatingCoolingState.AUTO
+          : this.Characteristic.TargetHeatingCoolingState.OFF)
+        .onSet((value: CharacteristicValue) => {
+          this.airtouch?.zoneSetActive(
+            zoneNumber,
+            Number(value) !== this.Characteristic.TargetHeatingCoolingState.OFF,
+          );
+        });
+    }
+
+    const targetTemperature = climate.getCharacteristic(this.Characteristic.TargetTemperature);
+    targetTemperature.setProps({ minValue: 5, maxValue: 35, minStep: 0.5 });
+    if (!targetTemperature.listenerCount('get') && !targetTemperature.listenerCount('set')) {
+      targetTemperature
+        .onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_temp ?? 20)
+        .onSet(() => {
+          targetTemperature.updateValue(this.zoneStatuses.get(zoneNumber)?.zone_temp ?? 20);
+        });
+    }
+
+    // Native fan control gives Apple Home the visible On/Off + percentage
+    // slider we need for the room damper.
+    let damper = accessory.getServiceById(this.Service.Fanv2, 'damper');
+    if (!damper) {
+      damper = accessory.addService(this.Service.Fanv2, `${name} Damper`, 'damper');
+    }
+    this.setServiceName(damper, `${name} Damper`);
+
+    const active = damper.getCharacteristic(this.Characteristic.Active);
     if (!active.listenerCount('get') && !active.listenerCount('set')) {
       active
         .onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_power_state
@@ -303,47 +355,33 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
         });
     }
 
-    const currentTemperature = room.getCharacteristic(this.Characteristic.CurrentTemperature);
-    if (!currentTemperature.listenerCount('get')) {
-      currentTemperature.onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_temp ?? 20);
-    }
-
-    const currentState = room.getCharacteristic(this.Characteristic.CurrentHeaterCoolerState);
-    if (!currentState.listenerCount('get')) {
-      currentState.onGet(() => this.getZoneCurrentHeaterCoolerState(zoneNumber));
-    }
-
-    // Room mode follows the main AirTouch system. Restrict this room-level
-    // characteristic to AUTO so it doesn't present itself as an independent
-    // heat/cool controller in HomeKit.
-    const targetState = room.getCharacteristic(this.Characteristic.TargetHeaterCoolerState);
-    targetState.setProps({
-      validValues: [this.Characteristic.TargetHeaterCoolerState.AUTO],
-    });
-    if (!targetState.listenerCount('get') && !targetState.listenerCount('set')) {
-      targetState
-        .onGet(() => this.Characteristic.TargetHeaterCoolerState.AUTO)
-        .onSet(() => {
-          targetState.updateValue(this.Characteristic.TargetHeaterCoolerState.AUTO);
-        });
-    }
-
-    // HomeKit renders RotationSpeed as a draggable percentage control. For
-    // AirTouch this is the room damper opening, in the controller's 5% steps.
-    const damper = room.getCharacteristic(this.Characteristic.RotationSpeed);
-    damper.setProps({
-      minValue: 0,
-      maxValue: 100,
-      minStep: 5,
-    });
-    if (!damper.listenerCount('get') && !damper.listenerCount('set')) {
-      damper
+    const percentage = damper.getCharacteristic(this.Characteristic.RotationSpeed);
+    percentage.setProps({ minValue: 0, maxValue: 100, minStep: 5 });
+    if (!percentage.listenerCount('get') && !percentage.listenerCount('set')) {
+      percentage
         .onGet(() => this.zoneStatuses.get(zoneNumber)?.zone_damper_position ?? 0)
         .onSet((value: CharacteristicValue) => {
           const rounded = Math.max(0, Math.min(100, Math.round(Number(value) / 5) * 5));
           this.airtouch?.zoneSetPercentage(zoneNumber, rounded);
         });
     }
+  }
+
+  private getZoneCurrentThermostatState(zoneNumber: number): number {
+    const zone = this.zoneStatuses.get(zoneNumber);
+    if (!zone?.zone_power_state || !this.acStatus?.ac_power_state) {
+      return this.Characteristic.CurrentHeatingCoolingState.OFF;
+    }
+
+    if (this.acStatus.ac_mode === MAGIC.AC_MODES.HEAT) {
+      return this.Characteristic.CurrentHeatingCoolingState.HEAT;
+    }
+
+    if (this.acStatus.ac_mode === MAGIC.AC_MODES.COOL) {
+      return this.Characteristic.CurrentHeatingCoolingState.COOL;
+    }
+
+    return this.Characteristic.CurrentHeatingCoolingState.OFF;
   }
 
   private getZoneCurrentHeaterCoolerState(zoneNumber: number): number {
@@ -401,21 +439,26 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
       item.context.kind === 'zone' && item.context.zoneNumber === zoneNumber,
     );
 
-    const room = accessory?.getService(this.Service.HeaterCooler);
-    room?.updateCharacteristic(
+    const climate = accessory?.getService(this.Service.Thermostat);
+    climate?.updateCharacteristic(this.Characteristic.CurrentTemperature, status.zone_temp);
+    climate?.updateCharacteristic(
+      this.Characteristic.CurrentHeatingCoolingState,
+      this.getZoneCurrentThermostatState(zoneNumber),
+    );
+    climate?.updateCharacteristic(
+      this.Characteristic.TargetHeatingCoolingState,
+      status.zone_power_state
+        ? this.Characteristic.TargetHeatingCoolingState.AUTO
+        : this.Characteristic.TargetHeatingCoolingState.OFF,
+    );
+    climate?.updateCharacteristic(this.Characteristic.TargetTemperature, status.zone_temp);
+
+    const damper = accessory?.getServiceById(this.Service.Fanv2, 'damper');
+    damper?.updateCharacteristic(
       this.Characteristic.Active,
       status.zone_power_state ? this.Characteristic.Active.ACTIVE : this.Characteristic.Active.INACTIVE,
     );
-    room?.updateCharacteristic(this.Characteristic.CurrentTemperature, status.zone_temp);
-    room?.updateCharacteristic(
-      this.Characteristic.CurrentHeaterCoolerState,
-      this.getZoneCurrentHeaterCoolerState(zoneNumber),
-    );
-    room?.updateCharacteristic(this.Characteristic.RotationSpeed, status.zone_damper_position);
-    room?.updateCharacteristic(
-      this.Characteristic.TargetHeaterCoolerState,
-      this.Characteristic.TargetHeaterCoolerState.AUTO,
-    );
+    damper?.updateCharacteristic(this.Characteristic.RotationSpeed, status.zone_damper_position);
   }
 
   private getSystemTargetMode(): number {
