@@ -237,27 +237,63 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
         .onGet(() => this.getSystemCurrentMode());
     }
 
-    const speeds: Array<[number, string]> = [];
-    if (this.acAbility?.ac_support_fan_auto) speeds.push([MAGIC.AC_FAN_SPEEDS.AUTO, 'Auto']);
-    if (this.acAbility?.ac_support_fan_low) speeds.push([MAGIC.AC_FAN_SPEEDS.LOW, 'Low']);
-    if (this.acAbility?.ac_support_fan_medium) speeds.push([MAGIC.AC_FAN_SPEEDS.MEDIUM, 'Medium']);
-    if (this.acAbility?.ac_support_fan_high) speeds.push([MAGIC.AC_FAN_SPEEDS.HIGH, 'High']);
+    // Remove the older individual fan-speed switches.
+    for (const speed of [
+      MAGIC.AC_FAN_SPEEDS.AUTO,
+      MAGIC.AC_FAN_SPEEDS.QUIET,
+      MAGIC.AC_FAN_SPEEDS.LOW,
+      MAGIC.AC_FAN_SPEEDS.MEDIUM,
+      MAGIC.AC_FAN_SPEEDS.HIGH,
+      MAGIC.AC_FAN_SPEEDS.POWERFUL,
+      MAGIC.AC_FAN_SPEEDS.TURBO,
+      MAGIC.AC_FAN_SPEEDS.INTELLIGENT,
+    ]) {
+      const oldFanSwitch = accessory.getServiceById(this.Service.Switch, `fan-${speed}`);
+      if (oldFanSwitch) {
+        accessory.removeService(oldFanSwitch);
+      }
+    }
 
-    for (const [speed, label] of speeds) {
-      let service = accessory.getServiceById(this.Service.Switch, `fan-${speed}`);
-      if (!service) {
-        service = accessory.addService(this.Service.Switch, `System Fan ${label}`, `fan-${speed}`);
-      }
-      this.setServiceName(service, `System Fan ${label}`);
-      if (!service.getCharacteristic(this.Characteristic.On).listenerCount('set')) {
-        service.getCharacteristic(this.Characteristic.On)
-          .onGet(() => this.acStatus?.ac_fan_speed === speed)
-          .onSet((value: CharacteristicValue) => {
-            if (Boolean(value)) {
-              this.airtouch?.acSetFanSpeed(acNumber, speed);
-            }
-          });
-      }
+    let systemFan = accessory.getServiceById(this.Service.Fanv2, 'system-fan');
+    if (!systemFan) {
+      systemFan = accessory.addService(this.Service.Fanv2, 'System Fan', 'system-fan');
+    }
+    this.setServiceName(systemFan, 'System Fan');
+    thermostat.addLinkedService(systemFan);
+
+    const fanActive = systemFan.getCharacteristic(this.Characteristic.Active);
+    if (!fanActive.listenerCount('get') && !fanActive.listenerCount('set')) {
+      fanActive
+        .onGet(() => this.acStatus?.ac_power_state
+          ? this.Characteristic.Active.ACTIVE
+          : this.Characteristic.Active.INACTIVE)
+        .onSet((value: CharacteristicValue) => {
+          const enabled = Number(value) === this.Characteristic.Active.ACTIVE;
+          if (!enabled) {
+            this.airtouch?.acSetTargetHeatingCoolingState(
+              acNumber,
+              this.Characteristic.TargetHeatingCoolingState.OFF,
+            );
+            return;
+          }
+
+          if (!this.acStatus?.ac_power_state) {
+            this.airtouch?.acSetTargetHeatingCoolingState(
+              acNumber,
+              this.getTargetModeForAirTouchMode(this.acStatus?.ac_mode),
+            );
+          }
+        });
+    }
+
+    const fanSpeed = systemFan.getCharacteristic(this.Characteristic.RotationSpeed);
+    fanSpeed.setProps({ minValue: 0, maxValue: 100, minStep: 1 });
+    if (!fanSpeed.listenerCount('get') && !fanSpeed.listenerCount('set')) {
+      fanSpeed
+        .onGet(() => this.getSystemFanPercentage())
+        .onSet((value: CharacteristicValue) => {
+          this.airtouch?.acSetFanSpeed(acNumber, this.getAirTouchFanSpeedForPercentage(Number(value)));
+        });
     }
   }
 
@@ -273,7 +309,7 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
     );
 
     // Google/HomeKit automation-friendly model:
-    // Primary Fanv2 = room damper (0-100%) + zone on/off
+    // Primary Fanv2 = room air vent (0-100%) + zone on/off
     // Secondary Switch = explicit zone on/off
     // Separate accessory = current room temperature
     for (const service of [...accessory.services]) {
@@ -289,9 +325,9 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
 
     let damper = accessory.getServiceById(this.Service.Fanv2, 'damper');
     if (!damper) {
-      damper = accessory.addService(this.Service.Fanv2, `${name} Damper`, 'damper');
+      damper = accessory.addService(this.Service.Fanv2, `${name} Air Vent`, 'damper');
     }
-    this.setServiceName(damper, `${name} Damper`);
+    this.setServiceName(damper, `${name} Air Vent`);
     damper.setPrimaryService();
 
     const active = damper.getCharacteristic(this.Characteristic.Active);
@@ -376,15 +412,12 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
     thermostat?.updateCharacteristic(this.Characteristic.CurrentHeatingCoolingState, this.getSystemCurrentMode());
     thermostat?.updateCharacteristic(this.Characteristic.TargetHeatingCoolingState, this.getSystemTargetMode());
 
-    for (const speed of [
-      MAGIC.AC_FAN_SPEEDS.AUTO,
-      MAGIC.AC_FAN_SPEEDS.LOW,
-      MAGIC.AC_FAN_SPEEDS.MEDIUM,
-      MAGIC.AC_FAN_SPEEDS.HIGH,
-    ]) {
-      accessory?.getServiceById(this.Service.Switch, `fan-${speed}`)
-        ?.updateCharacteristic(this.Characteristic.On, this.acStatus.ac_fan_speed === speed);
-    }
+    const systemFan = accessory?.getServiceById(this.Service.Fanv2, 'system-fan');
+    systemFan?.updateCharacteristic(
+      this.Characteristic.Active,
+      this.acStatus.ac_power_state ? this.Characteristic.Active.ACTIVE : this.Characteristic.Active.INACTIVE,
+    );
+    systemFan?.updateCharacteristic(this.Characteristic.RotationSpeed, this.getSystemFanPercentage());
   }
 
   private updateZoneAccessory(zoneNumber: number) {
@@ -410,6 +443,41 @@ export class AirTouchAdvancedPlatform implements DynamicPlatformPlugin {
     );
     temperatureAccessory?.getService(this.Service.TemperatureSensor)
       ?.updateCharacteristic(this.Characteristic.CurrentTemperature, status.zone_temp);
+  }
+
+  private getSupportedSystemFanSpeeds(): number[] {
+    const speeds: number[] = [];
+    if (this.acAbility?.ac_support_fan_auto) speeds.push(MAGIC.AC_FAN_SPEEDS.AUTO);
+    if (this.acAbility?.ac_support_fan_low) speeds.push(MAGIC.AC_FAN_SPEEDS.LOW);
+    if (this.acAbility?.ac_support_fan_medium) speeds.push(MAGIC.AC_FAN_SPEEDS.MEDIUM);
+    if (this.acAbility?.ac_support_fan_high) speeds.push(MAGIC.AC_FAN_SPEEDS.HIGH);
+    return speeds.length ? speeds : [MAGIC.AC_FAN_SPEEDS.AUTO, MAGIC.AC_FAN_SPEEDS.LOW, MAGIC.AC_FAN_SPEEDS.HIGH];
+  }
+
+  private getSystemFanPercentage(): number {
+    const speeds = this.getSupportedSystemFanSpeeds();
+    const current = this.acStatus?.ac_fan_speed ?? speeds[0];
+    const index = Math.max(0, speeds.indexOf(current));
+    if (speeds.length === 1) return 100;
+    return Math.round((index / (speeds.length - 1)) * 100);
+  }
+
+  private getAirTouchFanSpeedForPercentage(value: number): number {
+    const speeds = this.getSupportedSystemFanSpeeds();
+    if (speeds.length === 1) return speeds[0];
+    const clamped = Math.max(0, Math.min(100, value));
+    const index = Math.round((clamped / 100) * (speeds.length - 1));
+    return speeds[index];
+  }
+
+  private getTargetModeForAirTouchMode(mode?: number): number {
+    if (mode === MAGIC.AC_MODES.HEAT) {
+      return this.Characteristic.TargetHeatingCoolingState.HEAT;
+    }
+    if (mode === MAGIC.AC_MODES.COOL) {
+      return this.Characteristic.TargetHeatingCoolingState.COOL;
+    }
+    return this.Characteristic.TargetHeatingCoolingState.AUTO;
   }
 
   private getSystemTargetMode(): number {
